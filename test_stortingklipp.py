@@ -66,4 +66,70 @@ assert tekst.count("#EXTINF:") == 2
 assert "https://cdn.example/stortingssalen_5505/seg101.ts" in tekst
 assert "PROGRAM-DATE-TIME" not in tekst
 
+# web: Range, HEAD
+import http.client
+import threading
+from pathlib import Path
+
+import web
+
+KLIPP_TMP = Path(tempfile.mkdtemp())
+(KLIPP_TMP / "x.mp4").write_bytes(b"0123456789")
+web.KLIPP = KLIPP_TMP
+srv = web.ThreadingHTTPServer(("127.0.0.1", 0), web.H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+
+
+def be(headers=None):
+    conn.request("GET", "/fil/x.mp4", headers=headers or {})
+    r = conn.getresponse()
+    return r.status, dict(r.getheaders()), r.read()
+
+
+kode, h, kropp = be()
+assert (kode, h["Accept-Ranges"], kropp) == (200, "bytes", b"0123456789")
+kode, h, kropp = be({"Range": "bytes=2-5"})
+assert (kode, h["Content-Range"], h["Content-Length"], kropp) == (206, "bytes 2-5/10", "4", b"2345")
+kode, h, kropp = be({"Range": "bytes=7-"})
+assert (kode, h["Content-Range"], kropp) == (206, "bytes 7-9/10", b"789")
+kode, h, kropp = be({"Range": "bytes=-3"})
+assert (kode, h["Content-Range"], kropp) == (206, "bytes 7-9/10", b"789")
+kode, h, kropp = be({"Range": "bytes=0-100"})
+assert (kode, h["Content-Range"], kropp) == (206, "bytes 0-9/10", b"0123456789")
+kode, h, kropp = be({"Range": "bytes=99-"})
+assert (kode, h["Content-Range"], kropp) == (416, "bytes */10", b"")
+kode, _, kropp = be({"Range": "bytes=0-1,3-4"})
+assert (kode, kropp) == (200, b"0123456789")
+conn.request("HEAD", "/fil/x.mp4")
+r = conn.getresponse()
+assert (r.status, r.getheader("Content-Length"), r.read()) == (200, "10", b"")
+conn.request("HEAD", "/fil/gir.zip")
+r = conn.getresponse()
+assert r.status == 404 and int(r.getheader("Content-Length") or 0) > 0 and not r.read()
+conn.close()
+srv.shutdown()
+
+# talerliste: stopp ved tids-hoppen, så gårsdagens innlegg (feil datostempel) skjules
+import json
+
+
+def dato(dag, h, m, s=0):
+    return "/Date(%d)/" % int(datetime(2026, 10, dag, h, m, s, tzinfo=OSLO).timestamp() * 1000)
+
+
+web.hent = lambda url: json.dumps({"taler_liste": [
+    {"rekkefolge_nummer": 1, "rekkefolge_status": 1, "start_tid": dato(6, 10, 8), "taler_person_id": "GAMMEL1"},
+    {"rekkefolge_nummer": 2, "rekkefolge_status": 1, "start_tid": dato(6, 21, 57), "taler_person_id": "GAMMEL2"},
+    {"rekkefolge_nummer": 3, "rekkefolge_status": 1, "start_tid": dato(6, 10, 3, 37),
+     "taler_person_id": "JGS", "taler_rolle": "Statsminister"},
+    {"rekkefolge_nummer": 4, "rekkefolge_status": 1, "start_tid": dato(6, 10, 17), "taler_person_id": "SYL"},
+    {"rekkefolge_nummer": 5, "rekkefolge_status": 3, "start_tid": dato(6, 11, 0), "taler_person_id": "IKKE"},
+]})
+rad = web.talerliste()
+assert [t["taler_person_id"] for _, _, t in rad] == ["JGS", "SYL"]
+assert rad[0][0] == datetime(2026, 10, 6, 10, 3, 37, tzinfo=OSLO)
+assert rad[0][1] == rad[1][0]  # slutt = neste innlegg
+
 print("ok")

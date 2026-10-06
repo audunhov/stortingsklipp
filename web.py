@@ -5,7 +5,6 @@ import argparse
 import html
 import json
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -62,15 +61,23 @@ def talerliste():
     data = json.loads(hent(TALERLISTE))
     naa = datetime.now(OSLO)
     rad = []
-    for t in data.get("taler_liste") or []:
-        if t.get("rekkefolge_status") == 3:
-            continue
+    rows = data.get("taler_liste")
+    pastrows = []
+    for row in rows:
+        if row.get("rekkefolge_status") == 1:
+            pastrows.append(row)
+    pastrows.sort(key=lambda r: r.get("rekkefolge_nummer") or 0)
+    for t in pastrows or []:
         st = epos(t.get("start_tid"))
         if not st:
             continue
         st = st.astimezone(OSLO)
+        if rad and st < rad[-1][0]:
+            # Listen spenner to dager, men alt er stemplet i dag. Der tiden
+            # hopper bakover i rekkefolge begynner dagens møte (statsministeren)
+            # og alt før skjules.
+            rad.clear()
         rad.append((st, t))
-    rad.sort(key=lambda r: r[1].get("rekkefolge_nummer") or 0)
     ut = []
     for i, (st, t) in enumerate(rad):
         slutt = rad[i + 1][0] if i + 1 < len(rad) else naa
@@ -141,7 +148,8 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(innhold)))
         self.end_headers()
-        self.wfile.write(innhold)
+        if not getattr(self, "_head", False):
+            self.wfile.write(innhold)
 
     def side(self, kode, tittel, kropp):
         doc = f"""<!doctype html>
@@ -162,18 +170,51 @@ video{{width:100%}}</style></head><body>{kropp}<p><a href="/">Tilbake</a></p></b
         else:
             self.side(404, "Ikke funnet", "<h1>404</h1>")
 
+    def do_HEAD(self):
+        self._head = True
+        self.do_GET()
+
     def fil(self, navn):
         p = (KLIPP / navn).resolve()
         if not navn or "/" in navn or p.parent != KLIPP.resolve() or not p.is_file():
             self.side(404, "Ikke funnet",
                       "<h1>Filen finnes ikke</h1><p>Klipp slettes 5 minutter etter generering.</p>")
             return
-        self.send_response(200)
+        size = p.stat().st_size
+        start, slutt, kode = 0, size, 200
+        rng = (self.headers.get("Range") or "").strip()
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng)
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                slutt = size if not m.group(2) else min(int(m.group(2)), size - 1) + 1
+            else:
+                start = max(size - int(m.group(2)), 0)
+            if start >= size or slutt <= start:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            kode = 206
+        self.send_response(kode)
         self.send_header("Content-Type", "video/mp4")
-        self.send_header("Content-Length", str(p.stat().st_size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(slutt - start))
+        if kode == 206:
+            self.send_header("Content-Range", f"bytes {start}-{slutt - 1}/{size}")
         self.end_headers()
+        if getattr(self, "_head", False):
+            return
         with open(p, "rb") as f:
-            shutil.copyfileobj(f, self.wfile)
+            f.seek(start)
+            gjen = slutt - start
+            while gjen > 0:
+                b = f.read(min(262144, gjen))
+                if not b:
+                    break
+                self.wfile.write(b)
+                gjen -= len(b)
 
     def do_POST(self):
         if self.path.split("?")[0] != "/klipp":
