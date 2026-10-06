@@ -69,10 +69,8 @@ def talerliste():
         if not st:
             continue
         st = st.astimezone(OSLO)
-        if st > naa:
-            continue
         rad.append((st, t))
-    rad.sort(key=lambda r: r[0])
+    rad.sort(key=lambda r: r[1].get("rekkefolge_nummer") or 0)
     ut = []
     for i, (st, t) in enumerate(rad):
         slutt = rad[i + 1][0] if i + 1 < len(rad) else naa
