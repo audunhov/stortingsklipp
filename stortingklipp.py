@@ -90,6 +90,14 @@ def velg(segs, start, ende):
     return [s for s in segs if s[0] < ende and s[0] + timedelta(seconds=s[1]) > start]
 
 
+def fremdrift(linje, varighet):
+    """Parse en -progress-linje fra ffmpeg til prosent (0-100), eller None."""
+    m = re.fullmatch(r"out_time_(?:us|ms)=(-?\d+)\s*", linje)
+    if not m or varighet <= 0:
+        return None
+    return min(100, max(0, int(m.group(1)) * 100 // int(varighet * 1e6)))
+
+
 def skriv_lokale(valgt, path):
     with open(path, "w") as f:
         f.write("#EXTM3U\n#EXT-X-VERSION:3\n")
@@ -152,10 +160,18 @@ def main():
         "-ss", f"{(start - valgt[0][0]).total_seconds():.3f}",
         "-t", f"{varighet:.3f}",
         "-i", local.name,
-        "-c", "copy", "-movflags", "+faststart", str(ut),
+        "-c", "copy", "-movflags", "+faststart", "-progress", "pipe:1", str(ut),
     ]
     try:
-        subprocess.run(cmd, check=True)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+        siste = -1
+        for line in p.stdout or ():
+            prosent = fremdrift(line, varighet)
+            if prosent is not None and prosent != siste:
+                siste = prosent
+                print(f"prosent:{prosent}", flush=True)
+        if p.wait():
+            raise SystemExit(f"ffmpeg feilet ({p.returncode})")
     finally:
         Path(local.name).unlink(missing_ok=True)
     print(f"{ut}  {beskrivelse} {hoyde}p  {start:%H:%M:%S}→{ende:%H:%M:%S} ({varighet:.0f}s)")

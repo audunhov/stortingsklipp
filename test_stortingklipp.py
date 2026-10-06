@@ -109,6 +109,90 @@ conn.request("HEAD", "/fil/gir.zip")
 r = conn.getresponse()
 assert r.status == 404 and int(r.getheader("Content-Length") or 0) > 0 and not r.read()
 conn.close()
+
+# fremdrift: ffmpeg-progresslinje -> prosent
+import json
+import re
+
+from stortingklipp import fremdrift
+
+assert fremdrift("out_time_us=5000000\n", 10) == 50
+assert fremdrift("out_time_ms=10000000\n", 10) == 100
+assert fremdrift("out_time_us=0\n", 10) == 0
+assert fremdrift("out_time_us=999000000\n", 10) == 100  # klipp til over grensen
+assert fremdrift("out_time_us=-1\n", 10) == 0
+assert fremdrift("out_time_us=5000000\n", 0) is None
+assert fremdrift("progress=continue\n", 10) is None
+assert fremdrift("out_time_us=N/A\n", 10) is None
+
+
+# web: strømmende /klipp (JS) og HTML-fallback
+class FakePopen:
+    utfall = 0
+
+    def __init__(self, cmd, **kw):
+        self._navn = Path(cmd[cmd.index("-o") + 1]).name
+        self.stdout = iter(["prosent:50\n", "prosent:100\n", f"{self._navn}  Stortingssalen\n"])
+        self.stderr = iter([] if FakePopen.utfall == 0 else ["OOPS: ffmpeg gikk i veggen\n"])
+        self.returncode = FakePopen.utfall
+
+    def wait(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+_ekte_popen, web.subprocess.Popen = web.subprocess.Popen, FakePopen
+FORM = "rom=sal&fra=2026-10-06+10%3A00&til=2026-10-06+10%3A01"
+
+
+def post(body, headers=None):
+    c = http.client.HTTPConnection("127.0.0.1", srv.server_address[1])
+    c.request("POST", "/klipp", body=body, headers=headers or {})
+    r = c.getresponse()
+    return r.status, dict(r.getheaders()), r.read().decode(), c
+
+
+# JS-en må sende urlencoded: browser-FormData gir multipart som parse_qs ikke forstår
+web.hent = lambda url: json.dumps({"taler_liste": []})
+assert "new URLSearchParams(new FormData(skjema))" in web.forside()
+
+# JS-sti: strøm uten Content-Length, prosentlinjer, så fil:<navn>
+kode, h, kropp, c = post(FORM, {"X-Requested-With": "fetch"})
+assert kode == 200
+assert "Content-Length" not in h and h.get("Connection", "").lower() == "close"
+assert "prosent:50\nprosent:100\n" in kropp
+assert re.search(r"^fil:klipp_sal_20261006-100000_[0-9a-f]{6}\.mp4$", kropp, re.M)
+assert "Stortingssalen" in kropp
+c.close()
+
+# JS-sti: feil -> feil:-linje, ingen fil:
+FakePopen.utfall = 1
+kode, h, kropp, c = post(FORM, {"X-Requested-With": "fetch"})
+assert kode == 200 and "feil:OOPS: ffmpeg gikk i veggen" in kropp and "fil:" not in kropp
+c.close()
+FakePopen.utfall = 0
+
+# JS-sti: valideringsfeil -> 400 JSON før noe strømmes
+kode, h, kropp, c = post("rom=sal&fra=", {"X-Requested-With": "fetch"})
+assert kode == 400 and h["Content-Type"].startswith("application/json")
+assert json.loads(kropp)["feil"]
+c.close()
+
+# uten JS: HTML-side, prosentlinjene filtrert bort
+kode, h, kropp, c = post(FORM)
+assert kode == 200 and "Klipp klart" in kropp and "prosent:50" not in kropp
+c.close()
+
+# uten JS: feil -> HTML 400
+FakePopen.utfall = 1
+kode, h, kropp, c = post(FORM)
+assert kode == 400 and "OOPS: ffmpeg gikk i veggen" in kropp
+c.close()
+FakePopen.utfall = 0
+web.subprocess.Popen = _ekte_popen
+
 srv.shutdown()
 
 # talerliste: stopp ved tids-hoppen, så gårsdagens innlegg (feil datostempel) skjules

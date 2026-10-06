@@ -125,6 +125,13 @@ button{{width:100%;text-align:left;padding:.5rem;font:inherit;cursor:pointer}}
 video{{width:100%;margin-top:1rem}}
 input,select{{font:inherit;padding:.4rem}}
 label{{display:block;margin:.6rem 0 .2rem}}
+.fremdrift{{display:flex;align-items:center;gap:.6rem;margin:.4rem 0}}
+.fremdrift span{{font-size:.9rem}}
+.fremdrift b{{flex:1;min-width:5rem;height:.9rem;background:#e5e5e5;border-radius:.45rem;overflow:hidden;position:relative}}
+.fremdrift b::before{{content:"";position:absolute;inset:0;width:var(--p,0%);background:#2563eb;transition:width .4s}}
+.fremdrift.feil b::before{{background:#dc2626}}
+.fremdrift.venter b::before{{width:100%;background:repeating-linear-gradient(45deg,#2563eb 0 .6rem,#60a5fa .6rem 1.2rem);animation:stripe .9s linear infinite}}
+@keyframes stripe{{to{{background-position:1.7rem 0}}}}
 </style></head><body>
 <h1>Stortingklipp</h1>
 <h2>Tidligere innlegg i Stortingssalen</h2>
@@ -137,7 +144,86 @@ label{{display:block;margin:.6rem 0 .2rem}}
 <label>Maks høyde i px (valgfri)</label><input name="height" type="number" min="1">
 <p><button>Lag klipp</button></p>
 </form>
+<script>
+let aktiv = false;
+for (const skjema of document.querySelectorAll('form[action="/klipp"]')) {{
+  skjema.addEventListener('submit', async (e) => {{
+    e.preventDefault();
+    if (aktiv) return;
+    aktiv = true;
+    document.querySelectorAll('.fremdrift').forEach((el) => el.remove());
+    for (const b of document.querySelectorAll('button')) b.disabled = true;
+    const bar = document.createElement('div');
+    bar.className = 'fremdrift venter';
+    bar.innerHTML = '<b></b><span>Henter video …</span>';
+    skjema.after(bar);
+    const sett = (p, tekst, feil) => {{
+      bar.classList.toggle('feil', !!feil);
+      bar.classList.remove('venter');
+      bar.querySelector('b').style.setProperty('--p', (p ?? 100) + '%');
+      bar.querySelector('span').textContent = tekst;
+    }};
+    let fil = null, feil = null;
+    const ta = (linje) => {{
+      if (linje.startsWith('prosent:')) sett(+linje.slice(8), 'Lager klipp ' + linje.slice(8) + ' %');
+      else if (linje.startsWith('fil:')) fil = linje.slice(4);
+      else if (linje.startsWith('feil:')) feil = linje.slice(5);
+    }};
+    try {{
+      const r = await fetch('/klipp', {{method: 'POST', body: new URLSearchParams(new FormData(skjema)), headers: {{'X-Requested-With': 'fetch'}}}});
+      if (!r.ok) {{
+        feil = (await r.json()).feil || 'klipp feilet';
+      }} else {{
+        const leser = r.body.getReader(), dec = new TextDecoder();
+        let buf = '';
+        for (;;) {{
+          const {{done, value}} = await leser.read();
+          if (done) break;
+          buf += dec.decode(value, {{stream: true}});
+          let i;
+          while ((i = buf.indexOf('\\n')) >= 0) {{ ta(buf.slice(0, i)); buf = buf.slice(i + 1); }}
+        }}
+        if (buf) ta(buf);
+      }}
+    }} catch (err) {{
+      feil = String(err);
+    }}
+    if (feil || !fil) {{
+      sett(100, feil || 'uventet avslutning', true);
+    }} else {{
+      const a = document.createElement('a');
+      a.href = '/fil/' + fil; a.download = '';
+      a.click();
+      sett(100, '');
+      const s = bar.querySelector('span'), igjen = document.createElement('a');
+      igjen.href = '/fil/' + fil; igjen.download = ''; igjen.textContent = 'Last ned på nytt';
+      s.append(igjen);
+    }}
+    for (const b of document.querySelectorAll('button')) b.disabled = false;
+    aktiv = false;
+  }});
+}}
+</script>
 </body></html>"""
+
+
+def kjor(cmd):
+    """Kjør cmd og gi stdout-linjer én og én. Kaster RuntimeError ved feil."""
+    feil = []
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=BOK)
+    tr = threading.Thread(target=lambda: feil.extend(p.stderr or ()), daemon=True)
+    tr.start()
+    try:
+        for line in p.stdout or ():
+            yield line.rstrip("\n")
+        p.wait()
+    except GeneratorExit:
+        p.kill()
+        p.wait()
+        raise
+    tr.join()
+    if p.returncode:
+        raise RuntimeError("\n".join(feil).strip() or f"klipp feilet ({p.returncode})")
 
 
 class H(BaseHTTPRequestHandler):
@@ -151,6 +237,10 @@ class H(BaseHTTPRequestHandler):
         if not getattr(self, "_head", False):
             self.wfile.write(innhold)
 
+    def jsonsvar(self, kode, data):
+        self.gjor(kode, json.dumps(data, ensure_ascii=False).encode(),
+                  ctype="application/json; charset=utf-8")
+
     def side(self, kode, tittel, kropp):
         doc = f"""<!doctype html>
 <html lang="no"><head><meta charset="utf-8"><title>{html.escape(tittel)}</title>
@@ -159,7 +249,10 @@ video{{width:100%}}</style></head><body>{kropp}<p><a href="/">Tilbake</a></p></b
         self.gjor(kode, doc.encode())
 
     def feil(self, melding):
-        self.side(400, "Feil", f"<h1>Klipp feilet</h1><pre>{html.escape(melding)}</pre>")
+        if getattr(self, "_js", False):
+            self.jsonsvar(400, {"feil": melding})
+        else:
+            self.side(400, "Feil", f"<h1>Klipp feilet</h1><pre>{html.escape(melding)}</pre>")
 
     def do_GET(self):
         sti = unquote(self.path.split("?")[0])
@@ -216,10 +309,35 @@ video{{width:100%}}</style></head><body>{kropp}<p><a href="/">Tilbake</a></p></b
                 self.wfile.write(b)
                 gjen -= len(b)
 
+    def strom(self, navn, cmd):
+        """Strøm prosess-linjer til klienten til klippet er ferdig, så fil:<navn>."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        g = kjor(cmd)
+        try:
+            for linje in g:
+                self.wfile.write((linje + "\n").encode())
+        except RuntimeError as e:
+            try:
+                melding = str(e).replace("\n", " · ")
+                self.wfile.write(f"feil:{melding}\n".encode())
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        except (BrokenPipeError, ConnectionResetError):
+            g.close()
+            return
+        threading.Timer(LEVETID, lambda: (KLIPP / navn).unlink(missing_ok=True)).start()
+        self.wfile.write(f"fil:{navn}\n".encode())
+
     def do_POST(self):
         if self.path.split("?")[0] != "/klipp":
             self.side(404, "Ikke funnet", "<h1>404</h1>")
             return
+        self._js = self.headers.get("X-Requested-With") == "fetch"
         skjema = parse_qs(self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode())
 
         def f(n, d=""):
@@ -252,12 +370,16 @@ video{{width:100%}}</style></head><body>{kropp}<p><a href="/">Tilbake</a></p></b
         cmd = [sys.executable, str(BOK / "stortingklipp.py"), fra, til, "--rom", rom, "-o", str(KLIPP / navn)]
         if height:
             cmd += ["--height", height]
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=BOK)
-        if r.returncode != 0:
-            self.feil((r.stderr or r.stdout).strip())
+        if self._js:
+            self.strom(navn, cmd)
+            return
+        try:
+            linjer = list(kjor(cmd))
+        except RuntimeError as e:
+            self.feil(str(e))
             return
         threading.Timer(LEVETID, lambda: (KLIPP / navn).unlink(missing_ok=True)).start()
-        melding = html.escape((r.stdout or "").strip())
+        melding = html.escape("\n".join(l for l in linjer if not l.startswith("prosent:")))
         self.side(200, "Klipp klart", f"""<h1>Klipp klart</h1>
 <p>{melding}</p>
 <video controls src="/fil/{navn}"></video>
