@@ -19,9 +19,11 @@ func main() {
 		
 		type DisplayTaler struct {
 			klipp.Taler
-			Navn  string
-			Parti string
-			Rolle string
+			Navn     string
+			Parti    string
+			Rolle    string
+			Start    string
+			Varighet string
 		}
 
 		var displayTalere []DisplayTaler

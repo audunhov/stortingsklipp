@@ -25,7 +25,7 @@
         {{range .Talere}}
         <li class="flex justify-between gap-x-6 py-5">
             <div class="flex min-w-0 gap-x-4">
-                <img src="https://www.stortinget.no/Personimages/PersonImages_Large/{{.PersonID}}_stort.jpg" alt="" class="size-12 flex-none rounded-full bg-gray-50 dark:bg-gray-800" />
+                <img src="https://www.stortinget.no/Personimages/PersonImages_Large/{{.PersonID}}_stort.jpg" alt="" class="size-12 flex-none rounded-full object-cover object-top bg-gray-50 dark:bg-gray-800" />
                 <div class="min-w-0 flex-auto">
                     <p class="text-sm/6 font-semibold text-gray-900 dark:text-white">{{.Navn}}</p>
                     <p class="mt-1 flex text-xs/5 text-gray-500 dark:text-gray-400">
@@ -35,6 +35,12 @@
                 </div>
             </div>
             <div class="flex shrink-0 items-center gap-x-6">
+                {{if .Start}}
+                <div class="text-right">
+                    <p class="text-sm/6 font-semibold text-gray-900 dark:text-white">{{.Start}}</p>
+                    <p class="mt-1 text-xs/5 text-gray-500 dark:text-gray-400">{{.Varighet}}</p>
+                </div>
+                {{end}}
                 <a href="/klipp" class="text-sm font-semibold text-blue-600 hover:text-blue-500">Download</a>
             </div>
         </li>
